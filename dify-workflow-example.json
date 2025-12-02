@@ -1,0 +1,160 @@
+{
+  "name": "GeoGLI Chatbot Integration",
+  "description": "Example Dify workflow for integrating GeoGLI Chatbot API",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "title": "Start",
+      "data": {
+        "variables": [
+          {
+            "variable": "user_query",
+            "type": "string",
+            "required": true,
+            "description": "User's question about land degradation, climate, etc."
+          }
+        ]
+      }
+    },
+    {
+      "id": "http_recognize",
+      "type": "http-request",
+      "title": "Intent Recognition",
+      "data": {
+        "method": "POST",
+        "url": "http://your-server:8000/api/dify/recognize",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "query": "{{input.user_query}}"
+        },
+        "timeout": 30
+      }
+    },
+    {
+      "id": "domain_router",
+      "type": "if-else",
+      "title": "Route by Domain",
+      "data": {
+        "conditions": [
+          {
+            "id": "country_profile",
+            "condition": "{{http_recognize.data.domain}} == \"country_profile\"",
+            "logical_operator": "and"
+          },
+          {
+            "id": "legislation",
+            "condition": "{{http_recognize.data.domain}} == \"legislation\"",
+            "logical_operator": "and"
+          },
+          {
+            "id": "commitment",
+            "condition": "{{http_recognize.data.domain}} == \"commitment\"",
+            "logical_operator": "and"
+          }
+        ]
+      }
+    },
+    {
+      "id": "http_chat",
+      "type": "http-request",
+      "title": "Get Answer",
+      "data": {
+        "method": "POST",
+        "url": "http://your-server:8000/api/dify/chat",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "query": "{{input.user_query}}",
+          "conversation_id": "{{conversation_id}}"
+        },
+        "timeout": 60
+      }
+    },
+    {
+      "id": "format_output",
+      "type": "code",
+      "title": "Format Response",
+      "data": {
+        "code": "def main(answer, metadata, domain, targets):\n    # Format the response with metadata\n    formatted = f\"**Domain**: {domain}\\n\"\n    if targets:\n        formatted += f\"**Target**: {', '.join(targets)}\\n\"\n    formatted += f\"\\n{answer}\\n\"\n    \n    # Add source information if available\n    if metadata and 'source' in metadata:\n        formatted += f\"\\n*Source: {metadata['source']}*\"\n    \n    return {\n        \"result\": formatted,\n        \"metadata\": metadata\n    }",
+        "variables": [
+          {
+            "variable": "answer",
+            "value": "{{http_chat.data.answer}}"
+          },
+          {
+            "variable": "metadata",
+            "value": "{{http_chat.data.metadata}}"
+          },
+          {
+            "variable": "domain",
+            "value": "{{http_recognize.data.domain}}"
+          },
+          {
+            "variable": "targets",
+            "value": "{{http_recognize.data.targets}}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "output",
+      "type": "answer",
+      "title": "Output",
+      "data": {
+        "answer": "{{format_output.result}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "http_recognize"
+    },
+    {
+      "source": "http_recognize",
+      "target": "domain_router"
+    },
+    {
+      "source": "domain_router",
+      "target": "http_chat",
+      "sourceHandle": "country_profile"
+    },
+    {
+      "source": "domain_router",
+      "target": "http_chat",
+      "sourceHandle": "legislation"
+    },
+    {
+      "source": "domain_router",
+      "target": "http_chat",
+      "sourceHandle": "commitment"
+    },
+    {
+      "source": "http_chat",
+      "target": "format_output"
+    },
+    {
+      "source": "format_output",
+      "target": "output"
+    }
+  ],
+  "notes": [
+    {
+      "title": "Configuration",
+      "content": "Replace 'your-server:8000' with your actual GeoGLI Chatbot server URL"
+    },
+    {
+      "title": "Simple Version",
+      "content": "For a simpler workflow, skip the domain_router and connect http_recognize directly to http_chat"
+    },
+    {
+      "title": "Testing",
+      "content": "Test queries:\n- 'Saudi Arabia wildfires'\n- 'Ghana logging law 2020'\n- 'MENA restoration commitments'"
+    }
+  ]
+}

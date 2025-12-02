@@ -1,0 +1,29 @@
+services:
+  # GeoGLI Chatbot Backend Service
+  - type: web
+    name: geoglichatbot-backend
+    runtime: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: |
+      cd backend
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: |
+      cd backend
+      uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: RAG_BM25_ENABLED
+        value: "true"
+      - key: BM25_TOP_K
+        value: "3"
+      - key: RAG_DENSE_ENABLED
+        value: "false"
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: DATABASE_URL
+        value: sqlite:///./chatbot.db
+    healthCheckPath: /api/dify/health
