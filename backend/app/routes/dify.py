@@ -55,19 +55,37 @@ class DifyRecognizeResponse(BaseModel):
 @router.post("/chat", response_model=DifyChatResponse)
 async def dify_chat(request: Request, body: DifyChatRequest):
     """
-    Dify-compatible chat endpoint
+    Dify-compatible chat endpoint - Slot-driven structured results
     
-    This endpoint accepts Dify's standard chat format and returns responses
-    in a format that Dify can process. It wraps the existing GeoGLI chatbot
-    functionality.
+    This endpoint:
+    1. Extracts slots from query (via router_intent)
+    2. Calls dispatcher to get structured hits (tables/iframes)
+    3. Returns JSON with slots + hits (NO LLM, NO natural language answer)
+    
+    Dify workflow should:
+    - Call /recognize first to get slots
+    - Call /chat to get structured hits
+    - Use Dify's LLM node to format hits into natural language
     
     Example request:
     ```json
     {
-        "query": "What are the drought trends in Saudi Arabia?",
-        "user": "user123",
+        "query": "Egypt climate trends",
+        "conversation_id": "conv456"
+    }
+    ```
+    
+    Example response:
+    ```json
+    {
+        "event": "message",
         "conversation_id": "conv456",
-        "response_mode": "blocking"
+        "answer": null,
+        "metadata": {
+            "slots": {"targets": ["egypt"], "domain": "country_profile", ...},
+            "hits": [{"type": "iframe", "embed": {...}}, ...],
+            "source": "slot-engine"
+        }
     }
     ```
     """
@@ -77,131 +95,44 @@ async def dify_chat(request: Request, body: DifyChatRequest):
         # Get or generate session ID from conversation_id
         session_id = body.conversation_id or get_session_id_from_request(None, None)
         
-        # Import here to avoid circular dependencies
-        from app.router_graph import create_graph
-        from app.schemas import GraphState
+        # Step 1: Extract slots from query
+        from app.search.router_intent import route as route_intent
+        slots = route_intent(body.query)
         
-        # Set default top_k
-        top_k = int(os.getenv("BM25_TOP_K", "3"))
+        domain = slots.get("domain", "country_profile")
+        targets = slots.get("targets", [])
+        section_hint = slots.get("section_hint")
         
-        # Prepare initial state
-        initial_state: GraphState = {
-            "session_id": session_id,
-            "message": body.query,
-            "route": "auto",
-            "parsed": {},
-            "answer": "",
-            "citations": [],
-            "source_links": [],
-            "reason": None
-        }
+        print(f"🎯 Dify chat - Slots: domain={domain}, targets={targets}, section_hint={section_hint}")
         
-        # --- BM25 PRE-CHECK (same as main.py) ---
-        if RAG_BM25_ENABLED:
-            try:
-                from fastapi import FastAPI
-                from starlette.requests import Request as StarletteRequest
-                
-                # Get app instance to access bm25_stores
-                app = request.app
-                
-                if hasattr(app.state, 'bm25_stores') and app.state.bm25_stores:
-                    from app.search.router_intent import route as route_intent
-                    from app.search.handlers import (
-                        handle_ask_country, handle_commit_region,
-                        handle_commit_country, handle_law_lookup,
-                        format_hits_for_response
-                    )
-                    
-                    # Route the query
-                    slots = route_intent(body.query)
-                    intent = slots.get("intent", "ask.country")
-                    hits = []
-                    
-                    # Handle different intents
-                    if intent == "ask.country":
-                        hits = handle_ask_country(body.query, slots, app.state.bm25_stores)
-                    elif intent == "commit.region":
-                        hits = handle_commit_region(body.query, slots, app.state.bm25_stores)
-                    elif intent == "commit.country":
-                        hits = handle_commit_country(body.query, slots, app.state.bm25_stores)
-                    elif intent == "law.lookup":
-                        hits = handle_law_lookup(body.query, slots, app.state.bm25_stores)
-                    
-                    # If we got BM25 hits, format and return
-                    if hits:
-                        print(f"BM25 hit for intent '{intent}' in Dify endpoint")
-                        
-                        # Map local paths to public URLs
-                        def to_public_path(p):
-                            if isinstance(p, str) and p.startswith("backend/data"):
-                                return p.replace("backend/data", "/static-data")
-                            return p
-                        
-                        for hit in hits:
-                            if "images" in hit and isinstance(hit["images"], list):
-                                hit["images"] = [to_public_path(x) for x in hit["images"]]
-                            if "citation_path" in hit and isinstance(hit["citation_path"], str):
-                                hit["citation_path"] = to_public_path(hit["citation_path"])
-                        
-                        formatted_hits = format_hits_for_response(hits, intent)
-                        
-                        # Build Dify-compatible response
-                        latency_ms = int((time.time() - start_time) * 1000)
-                        
-                        # Format answer from hits
-                        answer_parts = []
-                        for hit in formatted_hits:
-                            if "title" in hit:
-                                answer_parts.append(f"**{hit['title']}**")
-                            if "text" in hit:
-                                answer_parts.append(hit["text"])
-                            if "images" in hit and hit["images"]:
-                                answer_parts.append(f"📊 {len(hit['images'])} visualization(s) available")
-                        
-                        answer = "\n\n".join(answer_parts) if answer_parts else "No results found."
-                        
-                        return DifyChatResponse(
-                            event="message",
-                            message_id=f"msg_{int(time.time() * 1000)}",
-                            conversation_id=session_id,
-                            mode="chat",
-                            answer=answer,
-                            metadata={
-                                "intent": intent,
-                                "hits": formatted_hits,
-                                "latency_ms": latency_ms,
-                                "source": "bm25"
-                            },
-                            created_at=int(time.time())
-                        )
-                        
-            except Exception as bm25_error:
-                print(f"BM25 pre-check error in Dify endpoint: {bm25_error}")
-                # Fall through to LangGraph
+        # Step 2: Call dispatcher to get structured hits
+        from app.engine.dispatcher import run_slot_query
         
-        # --- END BM25 PRE-CHECK ---
+        result = run_slot_query(
+            domain=domain,
+            targets=targets,
+            section_hint=section_hint,
+            iso3_codes=slots.get("iso3_codes", [])
+        )
         
-        # Run the graph if BM25 didn't return results
-        graph = create_graph()
-        final_state = graph.invoke(initial_state)
+        hits = result.get("hits", [])
         
         # Calculate latency
         latency_ms = int((time.time() - start_time) * 1000)
         
-        # Build Dify-compatible response
+        # Step 3: Return structured response (NO natural language answer)
         return DifyChatResponse(
             event="message",
             message_id=f"msg_{int(time.time() * 1000)}",
-            conversation_id=final_state["session_id"],
+            conversation_id=session_id,
             mode="chat",
-            answer=final_state["answer"],
+            answer="",  # No LLM-generated answer - Dify will format this
             metadata={
-                "route": final_state.get("route", "unknown"),
-                "source_links": final_state.get("source_links", []),
-                "citations": final_state.get("citations", []),
+                "slots": slots,
+                "hits": hits,
                 "latency_ms": latency_ms,
-                "source": "langgraph"
+                "source": "slot-engine",
+                "query": body.query
             },
             created_at=int(time.time())
         )
